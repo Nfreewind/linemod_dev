@@ -39,6 +39,7 @@
 #ifdef __cplusplus
 
 #include <opencv2/rgbd.hpp>
+#include <vector>
 
 namespace cv
 {
@@ -73,6 +74,10 @@ rescaleDepthTemplated<double>(const Mat& in, Mat& out)
 
 }
 }
+
+
+void saveCloud(const std::vector<cv::Vec3f>& cloud, std::string filename,float scale=1.0);
+void saveMat(cv::Mat&m, std::string filename);
 
 #endif /* __cplusplus */
 

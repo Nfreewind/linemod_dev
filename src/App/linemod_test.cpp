@@ -9,6 +9,12 @@
 #include <cstdio>
 #include <iostream>
 #include <fstream>
+//renderer headers
+#include <object_renderer/utils.h>
+#include <object_renderer/renderer3d.h>
+
+#include <pose_refine.h>
+using namespace std;
 // Function prototypes
 void subtractPlane(const cv::Mat& depth, cv::Mat& mask, std::vector<CvPoint>& chain, double f);
 
@@ -141,6 +147,41 @@ static void writeLinemod(const cv::Ptr<cv::linemod::Detector>& detector, const s
   fs << "]"; // classes
 }
 
+static void readInfo(cv::Mat& K, std::vector<cv::Mat>& rt_, const std::string& filename)
+{
+  cv::FileStorage fs(filename, cv::FileStorage::READ);
+  fs["K"]>>K;
+  int num=0;
+  fs["num"]>>num;
+  cv::FileNode fn=fs["rt_"];
+  for(int i=0;i<num;++i)
+  {
+    cv::Mat rt;
+    fn[i]>>rt;
+    rt_.push_back(rt);
+  }
+}
+static void writeInfo(const cv::Mat& K, std::vector<cv::Mat>& rt_, const std::string& filename)
+{
+  cv::FileStorage fs(filename, cv::FileStorage::WRITE);
+  fs<<"K"<<K;
+  fs<<"num"<<static_cast<int>(rt_.size());
+  fs<<"rt_"<<"[";
+  for(int i=0;i<rt_.size();++i)
+  {
+    fs<<rt_[i];
+  }
+  fs<<"]";
+}
+
+
+std::string replace_string(std::string str, std::string patten_org, std::string patten_new)
+{
+  int pos = str.find(patten_org);
+  if(pos==-1)
+    return str;
+  return str.replace(pos,patten_org.length(),patten_new);
+}
 IplImage * loadDepth(std::string a_name)
 {
     std::ifstream l_file(a_name.c_str(), std::ofstream::in | std::ofstream::binary);
@@ -170,14 +211,36 @@ IplImage * loadDepth(std::string a_name)
     return lp_image;
 }
 
+float intersectRect(const cv::Rect& rectA, const cv::Rect& rectB){
+  if (rectA.x > rectB.x + rectB.width) { return 0.; }
+  if (rectA.y > rectB.y + rectB.height) { return 0.; }
+  if ((rectA.x + rectA.width) < rectB.x) { return 0.; }
+  if ((rectA.y + rectA.height) < rectB.y) { return 0.; }
+  cv::Rect intersectRect;
+  float colInt = min(rectA.x + rectA.width, rectB.x + rectB.width) - max(rectA.x, rectB.x);
+  float rowInt = min(rectA.y + rectA.height, rectB.y + rectB.height) - max(rectA.y, rectB.y);
+  float intersection = colInt * rowInt;
+  float areaA = rectA.width * rectA.height;
+  float areaB = rectB.width * rectB.height;
+  float intersectionPercent = intersection / (areaA + areaB - intersection);
+
+  intersectRect.x = max(rectA.x, rectB.x);
+  intersectRect.y = max(rectA.y, rectB.y);
+  intersectRect.width = min(rectA.x + rectA.width, rectB.x + rectB.width) - intersectRect.x;
+  intersectRect.height = min(rectA.y + rectA.height, rectB.y + rectB.height) - intersectRect.y;
+  return intersectionPercent;
+}
+
+
 int main(int argc, char * argv[])
 {
   // Various settings and flags
   bool show_match_result = true;
   bool show_timings = true;
+  std::string model_filename;
 //  bool learn_online = false;
   int num_classes = 0;
-  int matching_threshold = 40;
+  int matching_threshold = 65;
   /// @todo Keys for changing these?
 //  cv::Size roi_size(200, 200);
 //  int learning_lower_bound = 90;
@@ -195,6 +258,8 @@ int main(int argc, char * argv[])
 
   // Initialize LINEMOD data structures
   cv::Ptr<cv::linemod::Detector> detector;
+  cv::Mat K_model;
+  std::vector<cv::Mat> rt_;
 //  std::string filename;
   if (argc <= 1)
   {
@@ -203,12 +268,17 @@ int main(int argc, char * argv[])
   }
   else
   {
-    detector = readLinemod(argv[1]);
-
+    model_filename = argv[1];
+    detector = readLinemod(model_filename+"_templates.yaml");
     std::vector<cv::String> ids = detector->classIds();
     num_classes = detector->numClasses();
     printf("Loaded %s with %d classes and %d templates\n",
            argv[1], num_classes, detector->numTemplates());
+    //read info
+    std::string info_filename = model_filename+"_info.yaml";
+    cout<<"info file name: "<<info_filename<<std::endl;
+    readInfo(K_model,rt_,info_filename);
+    std::cout<<"K: \n"<<K_model<<std::endl;
     if (!ids.empty())
     {
       printf("Class ids:\n");
@@ -217,13 +287,21 @@ int main(int argc, char * argv[])
   }
   int num_modalities = (int)detector->getModalities().size();
 
-//  double focal_length = 525;
+  // load color and depth, depth im milimeter
+//  IplImage* lp=loadDepth("depth0.dpt");
+//  cv::Mat depth = cv::cvarrToMat(lp);
+//  cv::Mat color = cv::imread("color0.jpg");
+  cv::Mat depth = cv::imread("1_depth.png",cv::IMREAD_ANYDEPTH);
+  depth.convertTo(depth,CV_16UC1);
+  cv::Mat color = cv::imread("1.jpg");
+  cv::cvtColor(color,color,CV_BGR2RGB);
 
-  // load color and depth
-  IplImage* lp=loadDepth("depth284.dpt");
-  cv::Mat depth = cv::cvarrToMat(lp);
-  cv::Mat color = cv::imread("color284.jpg");
-//  cv::cvtColor(color,color,CV_BGR2GRAY);
+  //initialize a renderer for test
+  Renderer3d renderer = Renderer3d(model_filename);
+  renderer.set_parameters(640,480,572.41140,573.57043,325.26110,242.04899);
+  cv::Mat K_scene = renderer.getIntrinsic();
+  std::cout<<K_scene<<std::endl;
+  poseRefine pr;
   // prepare show depth
   double min, max;
   cv::minMaxIdx(depth,&min,&max);
@@ -247,8 +325,10 @@ int main(int argc, char * argv[])
   detector->match(sources, (float)matching_threshold, matches, class_ids, quantized_images);
   match_timer.stop();
 
-  if (show_match_result && matches.empty())
+  if (show_match_result && matches.empty()){
     printf("No matches found...\n");
+    return -1;
+  }
   printf("found %d matches...\n",static_cast<int>(matches.size()));
   if (show_timings)
   {
@@ -258,33 +338,162 @@ int main(int argc, char * argv[])
   if (show_match_result || show_timings)
     printf("------------------------------------------------------------\n");
 
-  int classes_visited = 0;
-  std::set<std::string> visited;
 
 
-  for (int i = 0; (i < (int)matches.size()) /*&& (classes_visited < num_classes)*/; ++i)
+  //
+  // icp check
+  //
+  int top_k = 100;
+  std::vector<cv::Mat> icp_poses;
+  std::vector<float> icp_scores;
+  std::vector<cv::linemod::Match> icp_matches;
+  for(int i=0; (i < (int)matches.size() && i<top_k);++i)
   {
     cv::linemod::Match m = matches[i];
+    cv::Mat depth2;
+    cv::Mat tmp_rt = rt_[m.template_id].clone();
+    renderer.setModelRt(tmp_rt);
+    renderer.renderDepthOnly(depth2);
+    tmp_rt(cv::Range(0,3),cv::Range(3,4))/=1000.0;//scale to meter
+    pr.process(depth,depth2,K_scene,K_model,tmp_rt,m.x,m.y);
+    if(pr.fitness < 0.5 || pr.inlier_rmse>0.01)
+      continue;
+    icp_scores.push_back(1.0/(pr.inlier_rmse+0.01));
+    icp_poses.push_back(pr.result_refined.clone());
+    icp_matches.push_back(m);
+  }
 
-    if (visited.insert(m.class_id).second)
-    {
-      ++classes_visited;
-    }
-    if (show_match_result)
-    {
-      printf("Similarity: %5.1f%%; x: %3d; y: %3d; class: %s; template: %3d\n",
-             m.similarity, m.x, m.y, m.class_id.c_str(), m.template_id);
-    }
+  //
+  // nms
+  //
 
-    // Draw matching template
-    const std::vector<cv::linemod::Template>& templates = detector->getTemplates(m.class_id, m.template_id);
-      cv::Mat display = color.clone();
-    drawResponse(templates, num_modalities, display, cv::Point(m.x, m.y), detector->getT(0));
-    cv::imshow("color", display);
-    cv::imshow("normals", quantized_images[1]);
+  std::vector<int> sel_index;
+  std::vector<cv::Rect> sel_rect;//for_debug
+  for(int i=0;i<icp_scores.size();++i)
+  {
+    cv::linemod::Match& cm = icp_matches[i];
+    const std::vector<cv::linemod::Template>& ctemplates = detector->getTemplates(cm.class_id, cm.template_id);
+    cv::Rect cr(cm.x,cm.y,ctemplates[0].width*(ctemplates[0].pyramid_level+1),ctemplates[0].height*(ctemplates[0].pyramid_level+1));
+    if(sel_index.empty()){
+      sel_index.push_back(i);
+      sel_rect.push_back(cr);
+      continue;
+    }
+    bool found_replace=false;
+    for(int j=0;j<sel_index.size();++j)
+    {
+      //check replace condition
+      cv::linemod::Match& tm = icp_matches[sel_index[j]];
+      const std::vector<cv::linemod::Template>& ttemplates = detector->getTemplates(tm.class_id, tm.template_id);
+      cv::Rect tr(tm.x,tm.y,ttemplates[0].width*(ttemplates[0].pyramid_level+1),ttemplates[0].height*(ttemplates[0].pyramid_level+1));
+      float iou_val = intersectRect(tr,cr);
+      if(iou_val>0.5){
+        found_replace=true;
+        if(icp_scores[i]>icp_scores[j])
+        {
+          sel_index[j]=i;
+          sel_rect[j]=cr;
+        }
+        break;
+      }
+    }
+    if(!found_replace){
+      sel_index.push_back(i);
+      sel_rect.push_back(cr);
+    }
+  }
+  std::cout<<"final match select: "<< sel_index.size()<<std::endl;
+  std::vector<cv::Mat> final_poses;
+  std::vector<float> final_scores;
+  std::vector<cv::linemod::Match> final_matches;
+  for(int i=0;i<sel_index.size();++i)
+  {
+    final_poses.push_back(icp_poses[sel_index[i]]);
+    final_scores.push_back(icp_scores[sel_index[i]]);
+    final_matches.push_back(icp_matches[sel_index[i]]);
+  }
+
+  //
+  // draw rect
+  //
+  std::cout<<"iou test: "<<intersectRect(sel_rect[0],sel_rect[3])<<std::endl;
+  cv::Mat display0=color.clone();
+  for(int i=0;i<sel_rect.size();++i)
+  {
+    cv::rectangle(display0,sel_rect[i], cvScalar(0, 0, 255),1);
+  }
+  cv::imshow("rect: ", display0);
+  cv::waitKey(0);
+
+  //
+  // view final result
+  //
+  for(int i=0;i<final_poses.size();++i)
+  {
+    printf("ICP Score: %5.1f\n", final_scores[i]);
+    cv::Mat tmp_rt=final_poses[i].clone();
+    tmp_rt(cv::Range(0,3),cv::Range(3,4))*=1000.0;
+    renderer.setModelRt(tmp_rt);
+    cv::Mat reproject;
+    renderer.renderImageOnly(reproject);
+    cv::linemod::Match& cm = final_matches[i];
+    const std::vector<cv::linemod::Template>& templates = detector->getTemplates(cm.class_id, cm.template_id);
+    cv::Mat display = color.clone();
+    drawResponse(templates, num_modalities, display, cv::Point(cm.x, cm.y), detector->getT(0));
+    cv::imshow("original color",display);
+    cv::imshow("reproject", reproject);
     cv::waitKey(0);
   }
 
+// //
+// // test
+// //
+//    int classes_visited = 0;
+//    std::set<std::string> visited;
+//  for (int i = 0; (i < (int)matches.size()) /*&& (classes_visited < num_classes)*/; ++i)
+//  {
+//    cv::linemod::Match m = matches[i];
+
+//    if (visited.insert(m.class_id).second)
+//    {
+//      ++classes_visited;
+//    }
+//    if (show_match_result)
+//    {
+//      printf("Similarity: %5.1f%%; x: %3d; y: %3d; class: %s; template: %3d\n",
+//             m.similarity, m.x, m.y, m.class_id.c_str(), m.template_id);
+//    }
+
+//    // Draw matching template
+//    const std::vector<cv::linemod::Template>& templates = detector->getTemplates(m.class_id, m.template_id);
+//    cv::Mat display = color.clone();
+//    drawResponse(templates, num_modalities, display, cv::Point(m.x, m.y), detector->getT(0));
+//    // test read_info, reproject the rt to image
+//    renderer.setModelRt(rt_[m.template_id]);
+//    cv::Mat depth2;
+//    //@TODO check depth2 and depth scale
+//    renderer.renderDepthOnly(depth2);
+//    cv::Mat tmp_rt = rt_[m.template_id].clone();
+//    tmp_rt(cv::Range(0,3),cv::Range(3,4))/=1000.0;//scale to meter
+//    pr.process(depth,depth2,K_scene,K_model,tmp_rt,m.x,m.y);
+//    std::cout<<"fitness:" << pr.fitness<<std::endl;
+//    std::cout<<"inlier_rmse"<<pr.inlier_rmse<<std::endl;
+//    std::cout<<"org: "<<rt_[m.template_id]<<std::endl;
+//    std::cout<<"tmpRT: "<<tmp_rt<<std::endl;
+//    std::cout<<"nowRT: "<< pr.result_refined<<std::endl;
+//    // reproject use tmp_rt(which add an approximate translation
+//    cv::Mat refined_result_mili = pr.result_refined.clone();
+//    refined_result_mili(cv::Range(0,3),cv::Range(3,4))*=1000.0;
+//    renderer.setModelRt(refined_result_mili);
+////    std::cout<<"tmpRT: "<<tmp_rt<<std::endl;
+//    cv::Mat disp3;
+//    renderer.renderImageOnly(disp3);
+////    cv::flip(disp3,disp3,0);
+//    cv::imshow("color", display);
+//    cv::imshow("normals", quantized_images[1]);
+//    cv::imshow("reproject",disp3);
+//    cv::waitKey(0);
+//  }
 
 
 

@@ -1700,7 +1700,6 @@ void Detector::read(const FileNode& fn)
   class_templates.clear();
   pyramid_levels = fn["pyramid_levels"];
   fn["T"] >> T_at_level;
-
   modalities.clear();
   FileNode modalities_fn = fn["modalities"];
   FileNodeIterator it = modalities_fn.begin(), it_end = modalities_fn.end();
@@ -1831,6 +1830,7 @@ void Detector::writeClasses(const String& format) const
 }
 
 static const int T_DEFAULTS[] = {5, 8};
+//static const int T_DEFAULTS[]={5};
 
 Ptr<Detector> getDefaultLINE()
 {
@@ -1845,6 +1845,7 @@ Ptr<Detector> getDefaultLINEMOD()
   modalities.push_back(makePtr<ColorGradient>());
   modalities.push_back(makePtr<DepthNormal>());
   return makePtr<Detector>(modalities, std::vector<int>(T_DEFAULTS, T_DEFAULTS + 2));
+//  return makePtr<Detector>(modalities,std::vector<int>{T_DEFAULTS[0]});
 }
 
 } // namespace linemod
